@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::{
     api::{EmptyResult, JsonResult, JsonUpcase, JsonUpcaseVec, Notify, NumberOrString, PasswordData, UpdateType},
-    auth::{decode_invite, AdminHeaders, Headers, OwnerHeaders, ManagerHeaders, ManagerHeadersLoose},
+    auth::{decode_invite, AdminHeaders, Headers, ManagerHeaders, ManagerHeadersLoose, OwnerHeaders},
     db::{models::*, DbConn},
     mail, CONFIG,
 };
@@ -192,8 +192,8 @@ fn post_organization(
 
 // GET /api/collections?writeOnly=false
 #[get("/collections")]
-fn get_user_collections(headers: Headers, conn: DbConn) -> JsonResult {
-    Ok(Json(json!({
+fn get_user_collections(headers: Headers, conn: DbConn) -> Json<Value> {
+    Json(json!({
         "Data":
             Collection::find_by_user_uuid(&headers.user.uuid, &conn)
             .iter()
@@ -201,12 +201,12 @@ fn get_user_collections(headers: Headers, conn: DbConn) -> JsonResult {
             .collect::<Value>(),
         "Object": "list",
         "ContinuationToken": null,
-    })))
+    }))
 }
 
 #[get("/organizations/<org_id>/collections")]
-fn get_org_collections(org_id: String, _headers: AdminHeaders, conn: DbConn) -> JsonResult {
-    Ok(Json(json!({
+fn get_org_collections(org_id: String, _headers: AdminHeaders, conn: DbConn) -> Json<Value> {
+    Json(json!({
         "Data":
             Collection::find_by_organization(&org_id, &conn)
             .iter()
@@ -214,7 +214,7 @@ fn get_org_collections(org_id: String, _headers: AdminHeaders, conn: DbConn) -> 
             .collect::<Value>(),
         "Object": "list",
         "ContinuationToken": null,
-    })))
+    }))
 }
 
 #[post("/organizations/<org_id>/collections", data = "<data>")]
@@ -333,7 +333,12 @@ fn post_organization_collection_delete_user(
 }
 
 #[delete("/organizations/<org_id>/collections/<col_id>")]
-fn delete_organization_collection(org_id: String, col_id: String, _headers: ManagerHeaders, conn: DbConn) -> EmptyResult {
+fn delete_organization_collection(
+    org_id: String,
+    col_id: String,
+    _headers: ManagerHeaders,
+    conn: DbConn,
+) -> EmptyResult {
     match Collection::find_by_uuid(&col_id, &conn) {
         None => err!("Collection not found"),
         Some(collection) => {
@@ -426,9 +431,7 @@ fn put_collection_users(
             continue;
         }
 
-        CollectionUser::save(&user.user_uuid, &coll_id,
-                             d.ReadOnly, d.HidePasswords,
-                             &conn)?;
+        CollectionUser::save(&user.user_uuid, &coll_id, d.ReadOnly, d.HidePasswords, &conn)?;
     }
 
     Ok(())
@@ -441,30 +444,28 @@ struct OrgIdData {
 }
 
 #[get("/ciphers/organization-details?<data..>")]
-fn get_org_details(data: Form<OrgIdData>, headers: Headers, conn: DbConn) -> JsonResult {
+fn get_org_details(data: Form<OrgIdData>, headers: Headers, conn: DbConn) -> Json<Value> {
     let ciphers = Cipher::find_by_org(&data.organization_id, &conn);
-    let ciphers_json: Vec<Value> = ciphers
-        .iter()
-        .map(|c| c.to_json(&headers.host, &headers.user.uuid, &conn))
-        .collect();
+    let ciphers_json: Vec<Value> =
+        ciphers.iter().map(|c| c.to_json(&headers.host, &headers.user.uuid, &conn)).collect();
 
-    Ok(Json(json!({
+    Json(json!({
       "Data": ciphers_json,
       "Object": "list",
       "ContinuationToken": null,
-    })))
+    }))
 }
 
 #[get("/organizations/<org_id>/users")]
-fn get_org_users(org_id: String, _headers: ManagerHeadersLoose, conn: DbConn) -> JsonResult {
+fn get_org_users(org_id: String, _headers: ManagerHeadersLoose, conn: DbConn) -> Json<Value> {
     let users = UserOrganization::find_by_org(&org_id, &conn);
     let users_json: Vec<Value> = users.iter().map(|c| c.to_json_user_details(&conn)).collect();
 
-    Ok(Json(json!({
+    Json(json!({
         "Data": users_json,
         "Object": "list",
         "ContinuationToken": null,
-    })))
+    }))
 }
 
 #[derive(Deserialize)]
@@ -544,9 +545,7 @@ fn send_invite(org_id: String, data: JsonUpcase<InviteData>, headers: AdminHeade
                 match Collection::find_by_uuid_and_org(&col.Id, &org_id, &conn) {
                     None => err!("Collection not found in Organization"),
                     Some(collection) => {
-                        CollectionUser::save(&user.uuid, &collection.uuid,
-                                             col.ReadOnly, col.HidePasswords,
-                                             &conn)?;
+                        CollectionUser::save(&user.uuid, &collection.uuid, col.ReadOnly, col.HidePasswords, &conn)?;
                     }
                 }
             }
@@ -655,7 +654,7 @@ fn accept_invite(_org_id: String, _org_user_id: String, data: JsonUpcase<AcceptD
     }
 
     if CONFIG.mail_enabled() {
-        let mut org_name = String::from("bitwarden_rs");
+        let mut org_name = CONFIG.invitation_org_name();
         if let Some(org_id) = &claims.org_id {
             org_name = match Organization::find_by_uuid(&org_id, &conn) {
                 Some(org) => org.name,
@@ -801,9 +800,13 @@ fn edit_user(
             match Collection::find_by_uuid_and_org(&col.Id, &org_id, &conn) {
                 None => err!("Collection not found in Organization"),
                 Some(collection) => {
-                    CollectionUser::save(&user_to_edit.user_uuid, &collection.uuid,
-                                         col.ReadOnly, col.HidePasswords,
-                                         &conn)?;
+                    CollectionUser::save(
+                        &user_to_edit.user_uuid,
+                        &collection.uuid,
+                        col.ReadOnly,
+                        col.HidePasswords,
+                        &conn,
+                    )?;
                 }
             }
         }
@@ -899,16 +902,8 @@ fn post_org_import(
         .into_iter()
         .map(|cipher_data| {
             let mut cipher = Cipher::new(cipher_data.Type, cipher_data.Name.clone());
-            update_cipher_from_data(
-                &mut cipher,
-                cipher_data,
-                &headers,
-                false,
-                &conn,
-                &nt,
-                UpdateType::CipherCreate,
-            )
-            .ok();
+            update_cipher_from_data(&mut cipher, cipher_data, &headers, false, &conn, &nt, UpdateType::CipherCreate)
+                .ok();
             cipher
         })
         .collect();
@@ -930,15 +925,15 @@ fn post_org_import(
 }
 
 #[get("/organizations/<org_id>/policies")]
-fn list_policies(org_id: String, _headers: AdminHeaders, conn: DbConn) -> JsonResult {
+fn list_policies(org_id: String, _headers: AdminHeaders, conn: DbConn) -> Json<Value> {
     let policies = OrgPolicy::find_by_org(&org_id, &conn);
     let policies_json: Vec<Value> = policies.iter().map(OrgPolicy::to_json).collect();
 
-    Ok(Json(json!({
+    Json(json!({
         "Data": policies_json,
         "Object": "list",
         "ContinuationToken": null
-    })))
+    }))
 }
 
 #[get("/organizations/<org_id>/policies/token?<token>")]
@@ -989,7 +984,13 @@ struct PolicyData {
 }
 
 #[put("/organizations/<org_id>/policies/<pol_type>", data = "<data>")]
-fn put_policy(org_id: String, pol_type: i32, data: Json<PolicyData>, _headers: AdminHeaders, conn: DbConn) -> JsonResult {
+fn put_policy(
+    org_id: String,
+    pol_type: i32,
+    data: Json<PolicyData>,
+    _headers: AdminHeaders,
+    conn: DbConn,
+) -> JsonResult {
     let data: PolicyData = data.into_inner();
 
     let pol_type_enum = match OrgPolicyType::from_i32(pol_type) {
@@ -1017,8 +1018,8 @@ fn get_organization_tax(org_id: String, _headers: Headers, _conn: DbConn) -> Emp
 }
 
 #[get("/plans")]
-fn get_plans(_headers: Headers, _conn: DbConn) -> JsonResult {
-    Ok(Json(json!({
+fn get_plans(_headers: Headers, _conn: DbConn) -> Json<Value> {
+    Json(json!({
         "Object": "list",
         "Data": [
         {
@@ -1065,17 +1066,17 @@ fn get_plans(_headers: Headers, _conn: DbConn) -> JsonResult {
             }
         ],
         "ContinuationToken": null
-    })))
+    }))
 }
 
 #[get("/plans/sales-tax-rates")]
-fn get_plans_tax_rates(_headers: Headers, _conn: DbConn) -> JsonResult {
+fn get_plans_tax_rates(_headers: Headers, _conn: DbConn) -> Json<Value> {
     // Prevent a 404 error, which also causes Javascript errors.
-    Ok(Json(json!({
+    Json(json!({
         "Object": "list",
         "Data": [],
         "ContinuationToken": null
-    })))
+    }))
 }
 
 #[derive(Deserialize, Debug)]
@@ -1127,8 +1128,7 @@ fn import(org_id: String, data: JsonUpcase<OrgImportData>, headers: Headers, con
 
         // If user is not part of the organization, but it exists
         } else if UserOrganization::find_by_email_and_org(&user_data.Email, &org_id, &conn).is_none() {
-            if let Some (user) = User::find_by_mail(&user_data.Email, &conn) {
-                
+            if let Some(user) = User::find_by_mail(&user_data.Email, &conn) {
                 let user_org_status = if CONFIG.mail_enabled() {
                     UserOrgStatus::Invited as i32
                 } else {
@@ -1157,18 +1157,18 @@ fn import(org_id: String, data: JsonUpcase<OrgImportData>, headers: Headers, con
                         Some(headers.user.email.clone()),
                     )?;
                 }
-            }  
+            }
         }
     }
 
     // If this flag is enabled, any user that isn't provided in the Users list will be removed (by default they will be kept unless they have Deleted == true)
     if data.OverwriteExisting {
-        for user_org in UserOrganization::find_by_org_and_type(&org_id, UserOrgType::User as i32, &conn) {  
-            if let Some (user_email) = User::find_by_uuid(&user_org.user_uuid, &conn).map(|u| u.email) {
+        for user_org in UserOrganization::find_by_org_and_type(&org_id, UserOrgType::User as i32, &conn) {
+            if let Some(user_email) = User::find_by_uuid(&user_org.user_uuid, &conn).map(|u| u.email) {
                 if !data.Users.iter().any(|u| u.Email == user_email) {
                     user_org.delete(&conn)?;
                 }
-            } 
+            }
         }
     }
 

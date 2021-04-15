@@ -6,6 +6,7 @@ mod favorite;
 mod folder;
 mod org_policy;
 mod organization;
+mod send;
 mod two_factor;
 mod user;
 
@@ -17,5 +18,6 @@ pub use self::favorite::Favorite;
 pub use self::folder::{Folder, FolderCipher};
 pub use self::org_policy::{OrgPolicy, OrgPolicyType};
 pub use self::organization::{Organization, UserOrgStatus, UserOrgType, UserOrganization};
+pub use self::send::{Send, SendType};
 pub use self::two_factor::{TwoFactor, TwoFactorType};
 pub use self::user::{Invitation, User, UserStampException};

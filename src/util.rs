@@ -28,7 +28,10 @@ impl Fairing for AppHeaders {
         res.set_raw_header("X-Frame-Options", "SAMEORIGIN");
         res.set_raw_header("X-Content-Type-Options", "nosniff");
         res.set_raw_header("X-XSS-Protection", "1; mode=block");
-        let csp = format!("frame-ancestors 'self' chrome-extension://nngceckbapebfimnlniiiahkandclblb moz-extension://* {};", CONFIG.allowed_iframe_ancestors());
+        let csp = format!(
+            "frame-ancestors 'self' chrome-extension://nngceckbapebfimnlniiiahkandclblb moz-extension://* {};",
+            CONFIG.allowed_iframe_ancestors()
+        );
         res.set_raw_header("Content-Security-Policy", csp);
 
         // Disable cache unless otherwise specified
@@ -38,9 +41,9 @@ impl Fairing for AppHeaders {
     }
 }
 
-pub struct CORS();
+pub struct Cors();
 
-impl CORS {
+impl Cors {
     fn get_header(headers: &HeaderMap, name: &str) -> String {
         match headers.get_one(name) {
             Some(h) => h.to_string(),
@@ -48,18 +51,24 @@ impl CORS {
         }
     }
 
-    fn valid_url(url: String) -> String {
-        match url.as_ref() {
-            "file://" => "*".to_string(),
-            _ => url,
+    // Check a request's `Origin` header against the list of allowed origins.
+    // If a match exists, return it. Otherwise, return None.
+    fn get_allowed_origin(headers: &HeaderMap) -> Option<String> {
+        let origin = Cors::get_header(headers, "Origin");
+        let domain_origin = CONFIG.domain_origin();
+        let safari_extension_origin = "file://";
+        if origin == domain_origin || origin == safari_extension_origin {
+            Some(origin)
+        } else {
+            None
         }
     }
 }
 
-impl Fairing for CORS {
+impl Fairing for Cors {
     fn info(&self) -> Info {
         Info {
-            name: "CORS",
+            name: "Cors",
             kind: Kind::Response,
         }
     }
@@ -67,14 +76,14 @@ impl Fairing for CORS {
     fn on_response(&self, request: &Request, response: &mut Response) {
         let req_headers = request.headers();
 
-        // We need to explicitly get the Origin header for Access-Control-Allow-Origin
-        let req_allow_origin = CORS::valid_url(CORS::get_header(req_headers, "Origin"));
+        if let Some(origin) = Cors::get_allowed_origin(req_headers) {
+            response.set_header(Header::new("Access-Control-Allow-Origin", origin));
+        }
 
-        response.set_header(Header::new("Access-Control-Allow-Origin", req_allow_origin));
-
+        // Preflight request
         if request.method() == Method::Options {
-            let req_allow_headers = CORS::get_header(req_headers, "Access-Control-Request-Headers");
-            let req_allow_method = CORS::get_header(req_headers, "Access-Control-Request-Method");
+            let req_allow_headers = Cors::get_header(req_headers, "Access-Control-Request-Headers");
+            let req_allow_method = Cors::get_header(req_headers, "Access-Control-Request-Method");
 
             response.set_header(Header::new("Access-Control-Allow-Methods", req_allow_method));
             response.set_header(Header::new("Access-Control-Allow-Headers", req_allow_headers));
@@ -86,17 +95,21 @@ impl Fairing for CORS {
     }
 }
 
-pub struct Cached<R>(R, &'static str);
+pub struct Cached<R>(R, String);
 
 impl<R> Cached<R> {
-    pub const fn long(r: R) -> Cached<R> {
+    pub fn long(r: R) -> Cached<R> {
         // 7 days
-        Self(r, "public, max-age=604800")
+        Self::ttl(r, 604800)
     }
 
-    pub const fn short(r: R) -> Cached<R> {
+    pub fn short(r: R) -> Cached<R> {
         // 10 minutes
-        Self(r, "public, max-age=600")
+        Self(r, String::from("public, max-age=600"))
+    }
+
+    pub fn ttl(r: R, ttl: u64) -> Cached<R> {
+        Self(r, format!("public, immutable, max-age={}", ttl))
     }
 }
 
@@ -114,14 +127,8 @@ impl<'r, R: Responder<'r>> Responder<'r> for Cached<R> {
 
 // Log all the routes from the main paths list, and the attachments endpoint
 // Effectively ignores, any static file route, and the alive endpoint
-const LOGGED_ROUTES: [&str; 6] = [
-    "/api",
-    "/admin",
-    "/identity",
-    "/icons",
-    "/notifications/hub/negotiate",
-    "/attachments",
-];
+const LOGGED_ROUTES: [&str; 6] =
+    ["/api", "/admin", "/identity", "/icons", "/notifications/hub/negotiate", "/attachments"];
 
 // Boolean is extra debug, when true, we ignore the whitelist above and also print the mounts
 pub struct BetterLogging(pub bool);
@@ -148,7 +155,11 @@ impl Fairing for BetterLogging {
         }
 
         let config = rocket.config();
-        let scheme = if config.tls_enabled() { "https" } else { "http" };
+        let scheme = if config.tls_enabled() {
+            "https"
+        } else {
+            "http"
+        };
         let addr = format!("{}://{}:{}", &scheme, &config.address, &config.port);
         info!(target: "start", "Rocket has launched from {}", addr);
     }
@@ -283,8 +294,7 @@ where
 
 use std::env;
 
-pub fn get_env_str_value(key: &str) -> Option<String>
-{
+pub fn get_env_str_value(key: &str) -> Option<String> {
     let key_file = format!("{}_FILE", key);
     let value_from_env = env::var(key);
     let value_file = env::var(&key_file);
@@ -294,9 +304,9 @@ pub fn get_env_str_value(key: &str) -> Option<String>
         (Ok(v_env), Err(_)) => Some(v_env),
         (Err(_), Ok(v_file)) => match fs::read_to_string(v_file) {
             Ok(content) => Some(content.trim().to_string()),
-            Err(e) => panic!("Failed to load {}: {:?}", key, e)
+            Err(e) => panic!("Failed to load {}: {:?}", key, e),
         },
-        _ => None
+        _ => None,
     }
 }
 
@@ -356,6 +366,15 @@ pub fn format_datetime_local(dt: &DateTime<Local>, fmt: &str) -> String {
 /// and then calls [format_datetime_local](crate::util::format_datetime_local).
 pub fn format_naive_datetime_local(dt: &NaiveDateTime, fmt: &str) -> String {
     format_datetime_local(&Local.from_utc_datetime(dt), fmt)
+}
+
+//
+// Deployment environment methods
+//
+
+/// Returns true if the program is running in Docker or Podman.
+pub fn is_running_in_docker() -> bool {
+    Path::new("/.dockerenv").exists() || Path::new("/run/.containerenv").exists()
 }
 
 //
@@ -459,7 +478,6 @@ pub fn retry<F, T, E>(func: F, max_tries: u32) -> Result<T, E>
 where
     F: Fn() -> Result<T, E>,
 {
-    use std::{thread::sleep, time::Duration};
     let mut tries = 0;
 
     loop {
@@ -478,12 +496,13 @@ where
     }
 }
 
+use std::{thread::sleep, time::Duration};
+
 pub fn retry_db<F, T, E>(func: F, max_tries: u32) -> Result<T, E>
 where
     F: Fn() -> Result<T, E>,
     E: std::error::Error,
 {
-    use std::{thread::sleep, time::Duration};
     let mut tries = 0;
 
     loop {
@@ -502,4 +521,19 @@ where
             }
         }
     }
+}
+
+use reqwest::{
+    blocking::{Client, ClientBuilder},
+    header,
+};
+
+pub fn get_reqwest_client() -> Client {
+    get_reqwest_client_builder().build().expect("Failed to build client")
+}
+
+pub fn get_reqwest_client_builder() -> ClientBuilder {
+    let mut headers = header::HeaderMap::new();
+    headers.insert(header::USER_AGENT, header::HeaderValue::from_static("Bitwarden_RS"));
+    Client::builder().default_headers(headers).timeout(Duration::from_secs(10))
 }

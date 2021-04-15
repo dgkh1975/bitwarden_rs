@@ -58,28 +58,28 @@ fn decode_jwt<T: DeserializeOwned>(token: &str, issuer: String) -> Result<T, Err
         .map_res("Error decoding JWT")
 }
 
-pub fn decode_login(token: &str) -> Result<LoginJWTClaims, Error> {
+pub fn decode_login(token: &str) -> Result<LoginJwtClaims, Error> {
     decode_jwt(token, JWT_LOGIN_ISSUER.to_string())
 }
 
-pub fn decode_invite(token: &str) -> Result<InviteJWTClaims, Error> {
+pub fn decode_invite(token: &str) -> Result<InviteJwtClaims, Error> {
     decode_jwt(token, JWT_INVITE_ISSUER.to_string())
 }
 
-pub fn decode_delete(token: &str) -> Result<DeleteJWTClaims, Error> {
+pub fn decode_delete(token: &str) -> Result<DeleteJwtClaims, Error> {
     decode_jwt(token, JWT_DELETE_ISSUER.to_string())
 }
 
-pub fn decode_verify_email(token: &str) -> Result<VerifyEmailJWTClaims, Error> {
+pub fn decode_verify_email(token: &str) -> Result<VerifyEmailJwtClaims, Error> {
     decode_jwt(token, JWT_VERIFYEMAIL_ISSUER.to_string())
 }
 
-pub fn decode_admin(token: &str) -> Result<AdminJWTClaims, Error> {
+pub fn decode_admin(token: &str) -> Result<AdminJwtClaims, Error> {
     decode_jwt(token, JWT_ADMIN_ISSUER.to_string())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct LoginJWTClaims {
+pub struct LoginJwtClaims {
     // Not before
     pub nbf: i64,
     // Expiration time
@@ -110,7 +110,7 @@ pub struct LoginJWTClaims {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct InviteJWTClaims {
+pub struct InviteJwtClaims {
     // Not before
     pub nbf: i64,
     // Expiration time
@@ -132,9 +132,9 @@ pub fn generate_invite_claims(
     org_id: Option<String>,
     user_org_id: Option<String>,
     invited_by_email: Option<String>,
-) -> InviteJWTClaims {
+) -> InviteJwtClaims {
     let time_now = Utc::now().naive_utc();
-    InviteJWTClaims {
+    InviteJwtClaims {
         nbf: time_now.timestamp(),
         exp: (time_now + Duration::days(5)).timestamp(),
         iss: JWT_INVITE_ISSUER.to_string(),
@@ -147,7 +147,7 @@ pub fn generate_invite_claims(
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct DeleteJWTClaims {
+pub struct DeleteJwtClaims {
     // Not before
     pub nbf: i64,
     // Expiration time
@@ -158,9 +158,9 @@ pub struct DeleteJWTClaims {
     pub sub: String,
 }
 
-pub fn generate_delete_claims(uuid: String) -> DeleteJWTClaims {
+pub fn generate_delete_claims(uuid: String) -> DeleteJwtClaims {
     let time_now = Utc::now().naive_utc();
-    DeleteJWTClaims {
+    DeleteJwtClaims {
         nbf: time_now.timestamp(),
         exp: (time_now + Duration::days(5)).timestamp(),
         iss: JWT_DELETE_ISSUER.to_string(),
@@ -169,7 +169,7 @@ pub fn generate_delete_claims(uuid: String) -> DeleteJWTClaims {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct VerifyEmailJWTClaims {
+pub struct VerifyEmailJwtClaims {
     // Not before
     pub nbf: i64,
     // Expiration time
@@ -180,9 +180,9 @@ pub struct VerifyEmailJWTClaims {
     pub sub: String,
 }
 
-pub fn generate_verify_email_claims(uuid: String) -> DeleteJWTClaims {
+pub fn generate_verify_email_claims(uuid: String) -> DeleteJwtClaims {
     let time_now = Utc::now().naive_utc();
-    DeleteJWTClaims {
+    DeleteJwtClaims {
         nbf: time_now.timestamp(),
         exp: (time_now + Duration::days(5)).timestamp(),
         iss: JWT_VERIFYEMAIL_ISSUER.to_string(),
@@ -191,7 +191,7 @@ pub fn generate_verify_email_claims(uuid: String) -> DeleteJWTClaims {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct AdminJWTClaims {
+pub struct AdminJwtClaims {
     // Not before
     pub nbf: i64,
     // Expiration time
@@ -202,9 +202,9 @@ pub struct AdminJWTClaims {
     pub sub: String,
 }
 
-pub fn generate_admin_claims() -> AdminJWTClaims {
+pub fn generate_admin_claims() -> AdminJwtClaims {
     let time_now = Utc::now().naive_utc();
-    AdminJWTClaims {
+    AdminJwtClaims {
         nbf: time_now.timestamp(),
         exp: (time_now + Duration::minutes(20)).timestamp(),
         iss: JWT_ADMIN_ISSUER.to_string(),
@@ -222,13 +222,11 @@ use crate::db::{
     DbConn,
 };
 
-pub struct Headers {
+pub struct Host {
     pub host: String,
-    pub device: Device,
-    pub user: User,
 }
 
-impl<'a, 'r> FromRequest<'a, 'r> for Headers {
+impl<'a, 'r> FromRequest<'a, 'r> for Host {
     type Error = &'static str;
 
     fn from_request(request: &'a Request<'r>) -> Outcome<Self, Self::Error> {
@@ -260,6 +258,30 @@ impl<'a, 'r> FromRequest<'a, 'r> for Headers {
             };
 
             format!("{}://{}", protocol, host)
+        };
+
+        Outcome::Success(Host {
+            host,
+        })
+    }
+}
+
+pub struct Headers {
+    pub host: String,
+    pub device: Device,
+    pub user: User,
+}
+
+impl<'a, 'r> FromRequest<'a, 'r> for Headers {
+    type Error = &'static str;
+
+    fn from_request(request: &'a Request<'r>) -> Outcome<Self, Self::Error> {
+        let headers = request.headers();
+
+        let host = match Host::from_request(request) {
+            Outcome::Forward(_) => return Outcome::Forward(()),
+            Outcome::Failure(f) => return Outcome::Failure(f),
+            Outcome::Success(host) => host.host,
         };
 
         // Get access_token
@@ -296,10 +318,8 @@ impl<'a, 'r> FromRequest<'a, 'r> for Headers {
         };
 
         if user.security_stamp != claims.sstamp {
-            if let Some(stamp_exception) = user
-                .stamp_exception
-                .as_deref()
-                .and_then(|s| serde_json::from_str::<UserStampException>(s).ok())
+            if let Some(stamp_exception) =
+                user.stamp_exception.as_deref().and_then(|s| serde_json::from_str::<UserStampException>(s).ok())
             {
                 let current_route = match request.route().and_then(|r| r.name) {
                     Some(name) => name,
@@ -317,7 +337,11 @@ impl<'a, 'r> FromRequest<'a, 'r> for Headers {
             }
         }
 
-        Outcome::Success(Headers { host, device, user })
+        Outcome::Success(Headers {
+            host,
+            device,
+            user,
+        })
     }
 }
 
@@ -429,12 +453,12 @@ impl<'a, 'r> FromRequest<'a, 'r> for AdminHeaders {
     }
 }
 
-impl Into<Headers> for AdminHeaders {
-    fn into(self) -> Headers {
+impl From<AdminHeaders> for Headers {
+    fn from(h: AdminHeaders) -> Headers {
         Headers {
-            host: self.host,
-            device: self.device,
-            user: self.user,
+            host: h.host,
+            device: h.device,
+            user: h.user,
         }
     }
 }
@@ -485,7 +509,11 @@ impl<'a, 'r> FromRequest<'a, 'r> for ManagerHeaders {
                             };
 
                             if !headers.org_user.has_full_access() {
-                                match CollectionUser::find_by_collection_and_user(&col_id, &headers.org_user.user_uuid, &conn) {
+                                match CollectionUser::find_by_collection_and_user(
+                                    &col_id,
+                                    &headers.org_user.user_uuid,
+                                    &conn,
+                                ) {
                                     Some(_) => (),
                                     None => err_handler!("The current user isn't a manager for this collection"),
                                 }
@@ -508,12 +536,12 @@ impl<'a, 'r> FromRequest<'a, 'r> for ManagerHeaders {
     }
 }
 
-impl Into<Headers> for ManagerHeaders {
-    fn into(self) -> Headers {
+impl From<ManagerHeaders> for Headers {
+    fn from(h: ManagerHeaders) -> Headers {
         Headers {
-            host: self.host,
-            device: self.device,
-            user: self.user,
+            host: h.host,
+            device: h.device,
+            user: h.user,
         }
     }
 }
@@ -550,12 +578,12 @@ impl<'a, 'r> FromRequest<'a, 'r> for ManagerHeadersLoose {
     }
 }
 
-impl Into<Headers> for ManagerHeadersLoose {
-    fn into(self) -> Headers {
+impl From<ManagerHeadersLoose> for Headers {
+    fn from(h: ManagerHeadersLoose) -> Headers {
         Headers {
-            host: self.host,
-            device: self.device,
-            user: self.user,
+            host: h.host,
+            device: h.device,
+            user: h.user,
         }
     }
 }
@@ -615,10 +643,10 @@ impl<'a, 'r> FromRequest<'a, 'r> for ClientIp {
             None
         };
 
-        let ip = ip
-            .or_else(|| req.remote().map(|r| r.ip()))
-            .unwrap_or_else(|| "0.0.0.0".parse().unwrap());
+        let ip = ip.or_else(|| req.remote().map(|r| r.ip())).unwrap_or_else(|| "0.0.0.0".parse().unwrap());
 
-        Outcome::Success(ClientIp { ip })
+        Outcome::Success(ClientIp {
+            ip,
+        })
     }
 }

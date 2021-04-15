@@ -1,5 +1,3 @@
-use std::process::Command;
-
 use chrono::prelude::*;
 use diesel::r2d2::{ConnectionManager, Pool, PooledConnection};
 use rocket::{
@@ -25,7 +23,6 @@ pub mod __mysql_schema;
 #[path = "schemas/postgresql/schema.rs"]
 pub mod __postgresql_schema;
 
-
 // This is used to generate the main DbConn and DbPool enums, which contain one variant for each database supported
 macro_rules! generate_connections {
     ( $( $name:ident: $ty:ty ),+ ) => {
@@ -37,6 +34,7 @@ macro_rules! generate_connections {
         pub enum DbConn { $( #[cfg($name)] $name(PooledConnection<ConnectionManager< $ty >>), )+ }
 
         #[allow(non_camel_case_types)]
+        #[derive(Clone)]
         pub enum DbPool { $( #[cfg($name)] $name(Pool<ConnectionManager< $ty >>), )+ }
 
         impl DbPool {
@@ -109,7 +107,6 @@ impl DbConnType {
     }
 }
 
-
 #[macro_export]
 macro_rules! db_run {
     // Same for all dbs
@@ -124,11 +121,30 @@ macro_rules! db_run {
             $($(
                 #[cfg($db)]
                 crate::db::DbConn::$db(ref $conn) => {
-                    paste::paste! { 
+                    paste::paste! {
                         #[allow(unused)] use crate::db::[<__ $db _schema>]::{self as schema, *};
                         #[allow(unused)] use [<__ $db _model>]::*;
-                        #[allow(unused)] use crate::db::FromDb;  
+                        #[allow(unused)] use crate::db::FromDb;
                     }
+                    $body
+                },
+            )+)+
+        }
+    };
+
+    // Same for all dbs
+    ( @raw $conn:ident: $body:block ) => {
+        db_run! { @raw $conn: sqlite, mysql, postgresql $body }
+    };
+
+    // Different code for each db
+    ( @raw $conn:ident: $( $($db:ident),+ $body:block )+ ) => {
+        #[allow(unused)] use diesel::prelude::*;
+        #[allow(unused_variables)]
+        match $conn {
+            $($(
+                #[cfg($db)]
+                crate::db::DbConn::$db(ref $conn) => {
                     $body
                 },
             )+)+
@@ -136,14 +152,13 @@ macro_rules! db_run {
     };
 }
 
-
 pub trait FromDb {
     type Output;
     #[allow(clippy::wrong_self_convention)]
     fn from_db(self) -> Self::Output;
 }
 
-// For each struct eg. Cipher, we create a CipherDb inside a module named __$db_model (where $db is sqlite, mysql or postgresql), 
+// For each struct eg. Cipher, we create a CipherDb inside a module named __$db_model (where $db is sqlite, mysql or postgresql),
 // to implement the Diesel traits. We also provide methods to convert between them and the basic structs. Later, that module will be auto imported when using db_run!
 #[macro_export]
 macro_rules! db_object {
@@ -153,10 +168,10 @@ macro_rules! db_object {
             $( $( #[$field_attr:meta] )* $vis:vis $field:ident : $typ:ty ),+
             $(,)?
         }
-    )+ ) => { 
+    )+ ) => {
         // Create the normal struct, without attributes
         $( pub struct $name { $( /*$( #[$field_attr] )**/ $vis $field : $typ, )+ } )+
-        
+
         #[cfg(sqlite)]
         pub mod __sqlite_model     { $( db_object! { @db sqlite     |  $( #[$attr] )* | $name |  $( $( #[$field_attr] )* $field : $typ ),+ } )+ }
         #[cfg(mysql)]
@@ -177,7 +192,7 @@ macro_rules! db_object {
             )+ }
 
             impl [<$name Db>] {
-                #[allow(clippy::wrong_self_convention)] 
+                #[allow(clippy::wrong_self_convention)]
                 #[inline(always)] pub fn to_db(x: &super::$name) -> Self { Self { $( $field: x.$field.clone(), )+ } }
             }
 
@@ -202,23 +217,37 @@ macro_rules! db_object {
 // Reexport the models, needs to be after the macros are defined so it can access them
 pub mod models;
 
-/// Creates a back-up of the database using sqlite3
-pub fn backup_database() -> Result<(), Error> {
-    use std::path::Path;
-    let db_url = CONFIG.database_url();
-    let db_path = Path::new(&db_url).parent().unwrap();
-
-    let now: DateTime<Utc> = Utc::now();
-    let file_date = now.format("%Y%m%d").to_string();
-    let backup_command: String = format!("{}{}{}", ".backup 'db_", file_date, ".sqlite3'");
-
-    Command::new("sqlite3")
-        .current_dir(db_path)
-        .args(&["db.sqlite3", &backup_command])
-        .output()
-        .expect("Can't open database, sqlite3 is not available, make sure it's installed and available on the PATH");
+/// Creates a back-up of the sqlite database
+/// MySQL/MariaDB and PostgreSQL are not supported.
+pub fn backup_database(conn: &DbConn) -> Result<(), Error> {
+    db_run! {@raw conn:
+        postgresql, mysql {
+            err!("PostgreSQL and MySQL/MariaDB do not support this backup feature");
+        }
+        sqlite {
+            use std::path::Path;
+            let db_url = CONFIG.database_url();
+            let db_path = Path::new(&db_url).parent().unwrap().to_string_lossy();
+            let file_date = Utc::now().format("%Y%m%d_%H%M%S").to_string();
+            diesel::sql_query(format!("VACUUM INTO '{}/db_{}.sqlite3'", db_path, file_date)).execute(conn)?;
+        }
+    }
 
     Ok(())
+}
+
+/// Get the SQL Server version
+pub fn get_sql_server_version(conn: &DbConn) -> String {
+    db_run! {@raw conn:
+        postgresql, mysql {
+            no_arg_sql_function!(version, diesel::sql_types::Text);
+            diesel::select(version).get_result::<String>(conn).unwrap_or_else(|_| "Unknown".to_string())
+        }
+        sqlite {
+            no_arg_sql_function!(sqlite_version, diesel::sql_types::Text);
+            diesel::select(sqlite_version).get_result::<String>(conn).unwrap_or_else(|_| "Unknown".to_string())
+        }
+    }
 }
 
 /// Attempts to retrieve a single connection from the managed database pool. If
@@ -259,10 +288,9 @@ mod sqlite_migrations {
 
         use diesel::{Connection, RunQueryDsl};
         // Make sure the database is up to date (create if it doesn't exist, or run the migrations)
-        let connection =
-            diesel::sqlite::SqliteConnection::establish(&crate::CONFIG.database_url())?;
+        let connection = diesel::sqlite::SqliteConnection::establish(&crate::CONFIG.database_url())?;
         // Disable Foreign Key Checks during migration
-        
+
         // Scoped to a connection.
         diesel::sql_query("PRAGMA foreign_keys = OFF")
             .execute(&connection)
@@ -270,9 +298,7 @@ mod sqlite_migrations {
 
         // Turn on WAL in SQLite
         if crate::CONFIG.enable_db_wal() {
-            diesel::sql_query("PRAGMA journal_mode=wal")
-                .execute(&connection)
-                .expect("Failed to turn on WAL");
+            diesel::sql_query("PRAGMA journal_mode=wal").execute(&connection).expect("Failed to turn on WAL");
         }
 
         embedded_migrations::run_with_output(&connection, &mut std::io::stdout())?;
@@ -288,8 +314,7 @@ mod mysql_migrations {
     pub fn run_migrations() -> Result<(), super::Error> {
         use diesel::{Connection, RunQueryDsl};
         // Make sure the database is up to date (create if it doesn't exist, or run the migrations)
-        let connection =
-            diesel::mysql::MysqlConnection::establish(&crate::CONFIG.database_url())?;
+        let connection = diesel::mysql::MysqlConnection::establish(&crate::CONFIG.database_url())?;
         // Disable Foreign Key Checks during migration
 
         // Scoped to a connection/session.
@@ -310,10 +335,9 @@ mod postgresql_migrations {
     pub fn run_migrations() -> Result<(), super::Error> {
         use diesel::{Connection, RunQueryDsl};
         // Make sure the database is up to date (create if it doesn't exist, or run the migrations)
-        let connection =
-            diesel::pg::PgConnection::establish(&crate::CONFIG.database_url())?;
+        let connection = diesel::pg::PgConnection::establish(&crate::CONFIG.database_url())?;
         // Disable Foreign Key Checks during migration
-        
+
         // FIXME: Per https://www.postgresql.org/docs/12/sql-set-constraints.html,
         // "SET CONSTRAINTS sets the behavior of constraint checking within the
         // current transaction", so this setting probably won't take effect for

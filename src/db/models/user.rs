@@ -5,7 +5,7 @@ use crate::crypto;
 use crate::CONFIG;
 
 db_object! {
-    #[derive(Debug, Identifiable, Queryable, Insertable, AsChangeset)]
+    #[derive(Identifiable, Queryable, Insertable, AsChangeset)]
     #[table_name = "users"]
     #[changeset_options(treat_none_as_null="true")]
     #[primary_key(uuid)]
@@ -47,7 +47,7 @@ db_object! {
     }
 
 
-    #[derive(Debug, Identifiable, Queryable, Insertable)]
+    #[derive(Identifiable, Queryable, Insertable)]
     #[table_name = "invitations"]
     #[primary_key(email)]
     pub struct Invitation {
@@ -63,8 +63,8 @@ enum UserStatus {
 
 #[derive(Serialize, Deserialize)]
 pub struct UserStampException {
-  pub route: String,
-  pub security_stamp: String
+    pub route: String,
+    pub security_stamp: String,
 }
 
 /// Local methods
@@ -162,7 +162,7 @@ impl User {
     pub fn set_stamp_exception(&mut self, route_exception: &str) {
         let stamp_exception = UserStampException {
             route: route_exception.to_string(),
-            security_stamp: self.security_stamp.to_string()
+            security_stamp: self.security_stamp.to_string(),
         };
         self.stamp_exception = Some(serde_json::to_string(&stamp_exception).unwrap_or_default());
     }
@@ -177,7 +177,7 @@ impl User {
     }
 }
 
-use super::{Cipher, Device, Favorite, Folder, TwoFactor, UserOrgType, UserOrganization};
+use super::{Cipher, Device, Favorite, Folder, Send, TwoFactor, UserOrgType, UserOrganization};
 use crate::db::DbConn;
 
 use crate::api::EmptyResult;
@@ -263,6 +263,7 @@ impl User {
             }
         }
 
+        Send::delete_all_by_user(&self.uuid, conn)?;
         UserOrganization::delete_all_by_user(&self.uuid, conn)?;
         Cipher::delete_all_by_user(&self.uuid, conn)?;
         Favorite::delete_all_by_user(&self.uuid, conn)?;
@@ -340,14 +341,16 @@ impl User {
     pub fn last_active(&self, conn: &DbConn) -> Option<NaiveDateTime> {
         match Device::find_latest_active_by_user(&self.uuid, conn) {
             Some(device) => Some(device.updated_at),
-            None => None
+            None => None,
         }
     }
 }
 
 impl Invitation {
     pub const fn new(email: String) -> Self {
-        Self { email }
+        Self {
+            email,
+        }
     }
 
     pub fn save(&self, conn: &DbConn) -> EmptyResult {

@@ -4,12 +4,7 @@ use rocket::Route;
 use rocket_contrib::json::Json;
 use serde_json::Value as JsonValue;
 
-use crate::{
-    api::{EmptyResult, JsonResult},
-    auth::Headers,
-    db::DbConn,
-    Error, CONFIG,
-};
+use crate::{api::EmptyResult, auth::Headers, db::DbConn, Error, CONFIG};
 
 pub fn routes() -> Vec<Route> {
     routes![negotiate, websockets_err]
@@ -19,19 +14,23 @@ static SHOW_WEBSOCKETS_MSG: AtomicBool = AtomicBool::new(true);
 
 #[get("/hub")]
 fn websockets_err() -> EmptyResult {
-    if CONFIG.websocket_enabled() && SHOW_WEBSOCKETS_MSG.compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
-        err!("
+    if CONFIG.websocket_enabled()
+        && SHOW_WEBSOCKETS_MSG.compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+    {
+        err!(
+            "
     ###########################################################
     '/notifications/hub' should be proxied to the websocket server or notifications won't work.
     Go to the Wiki for more info, or disable WebSockets setting WEBSOCKET_ENABLED=false.
-    ###########################################################################################\n")
+    ###########################################################################################\n"
+        )
     } else {
         Err(Error::empty())
     }
 }
 
 #[post("/hub/negotiate")]
-fn negotiate(_headers: Headers, _conn: DbConn) -> JsonResult {
+fn negotiate(_headers: Headers, _conn: DbConn) -> Json<JsonValue> {
     use crate::crypto;
     use data_encoding::BASE64URL;
 
@@ -47,10 +46,10 @@ fn negotiate(_headers: Headers, _conn: DbConn) -> JsonResult {
     // Rocket SSE support: https://github.com/SergioBenitez/Rocket/issues/33
     // {"transport":"ServerSentEvents", "transferFormats":["Text"]},
     // {"transport":"LongPolling", "transferFormats":["Text","Binary"]}
-    Ok(Json(json!({
+    Json(json!({
         "connectionId": conn_id,
         "availableTransports": available_transports
-    })))
+    }))
 }
 
 //
@@ -120,7 +119,7 @@ fn convert_option<T: Into<Value>>(option: Option<T>) -> Value {
 }
 
 // Server WebSocket handler
-pub struct WSHandler {
+pub struct WsHandler {
     out: Sender,
     user_uuid: Option<String>,
     users: WebSocketUsers,
@@ -140,7 +139,7 @@ const PING: Token = Token(1);
 
 const ACCESS_TOKEN_KEY: &str = "access_token=";
 
-impl WSHandler {
+impl WsHandler {
     fn err(&self, msg: &'static str) -> ws::Result<()> {
         self.out.close(ws::CloseCode::Invalid)?;
 
@@ -166,8 +165,8 @@ impl WSHandler {
         if let Some(params) = path.split('?').nth(1) {
             let params_iter = params.split('&').take(1);
             for val in params_iter {
-                if val.starts_with(ACCESS_TOKEN_KEY) {
-                    return Some(val[ACCESS_TOKEN_KEY.len()..].into());
+                if let Some(stripped) = val.strip_prefix(ACCESS_TOKEN_KEY) {
+                    return Some(stripped.into());
                 }
             }
         };
@@ -176,7 +175,7 @@ impl WSHandler {
     }
 }
 
-impl Handler for WSHandler {
+impl Handler for WsHandler {
     fn on_open(&mut self, hs: Handshake) -> ws::Result<()> {
         // Path == "/notifications/hub?id=<id>==&access_token=<access_token>"
         //
@@ -204,9 +203,7 @@ impl Handler for WSHandler {
         let handler_insert = self.out.clone();
         let handler_update = self.out.clone();
 
-        self.users
-            .map
-            .upsert(user_uuid, || vec![handler_insert], |ref mut v| v.push(handler_update));
+        self.users.map.upsert(user_uuid, || vec![handler_insert], |ref mut v| v.push(handler_update));
 
         // Schedule a ping to keep the connection alive
         self.out.timeout(PING_MS, PING)
@@ -216,7 +213,11 @@ impl Handler for WSHandler {
         if let Message::Text(text) = msg.clone() {
             let json = &text[..text.len() - 1]; // Remove last char
 
-            if let Ok(InitialMessage { protocol, version }) = from_str::<InitialMessage>(json) {
+            if let Ok(InitialMessage {
+                protocol,
+                version,
+            }) = from_str::<InitialMessage>(json)
+            {
                 if &protocol == "messagepack" && version == 1 {
                     return self.out.send(&INITIAL_RESPONSE[..]); // Respond to initial message
                 }
@@ -240,13 +241,13 @@ impl Handler for WSHandler {
     }
 }
 
-struct WSFactory {
+struct WsFactory {
     pub users: WebSocketUsers,
 }
 
-impl WSFactory {
+impl WsFactory {
     pub fn init() -> Self {
-        WSFactory {
+        WsFactory {
             users: WebSocketUsers {
                 map: Arc::new(CHashMap::new()),
             },
@@ -254,11 +255,11 @@ impl WSFactory {
     }
 }
 
-impl Factory for WSFactory {
-    type Handler = WSHandler;
+impl Factory for WsFactory {
+    type Handler = WsHandler;
 
     fn connection_made(&mut self, out: Sender) -> Self::Handler {
-        WSHandler {
+        WsHandler {
             out,
             user_uuid: None,
             users: self.users.clone(),
@@ -295,10 +296,7 @@ impl WebSocketUsers {
     // NOTE: The last modified date needs to be updated before calling these methods
     pub fn send_user_update(&self, ut: UpdateType, user: &User) {
         let data = create_update(
-            vec![
-                ("UserId".into(), user.uuid.clone().into()),
-                ("Date".into(), serialize_date(user.updated_at)),
-            ],
+            vec![("UserId".into(), user.uuid.clone().into()), ("Date".into(), serialize_date(user.updated_at))],
             ut,
         );
 
@@ -394,6 +392,10 @@ pub enum UpdateType {
 
     LogOut = 11,
 
+    SyncSendCreate = 12,
+    SyncSendUpdate = 13,
+    SyncSendDelete = 14,
+
     None = 100,
 }
 
@@ -401,15 +403,17 @@ use rocket::State;
 pub type Notify<'a> = State<'a, WebSocketUsers>;
 
 pub fn start_notification_server() -> WebSocketUsers {
-    let factory = WSFactory::init();
+    let factory = WsFactory::init();
     let users = factory.users.clone();
 
     if CONFIG.websocket_enabled() {
         thread::spawn(move || {
-            let mut settings = ws::Settings::default();
-            settings.max_connections = 500;
-            settings.queue_size = 2;
-            settings.panic_on_internal = false;
+            let settings = ws::Settings {
+                max_connections: 500,
+                queue_size: 2,
+                panic_on_internal: false,
+                ..Default::default()
+            };
 
             ws::Builder::new()
                 .with_settings(settings)

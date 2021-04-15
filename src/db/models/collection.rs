@@ -1,9 +1,9 @@
 use serde_json::Value;
 
-use super::{Organization, UserOrgStatus, UserOrgType, UserOrganization, User, Cipher};
+use super::{Cipher, Organization, User, UserOrgStatus, UserOrgType, UserOrganization};
 
 db_object! {
-    #[derive(Debug, Identifiable, Queryable, Insertable, Associations, AsChangeset)]
+    #[derive(Identifiable, Queryable, Insertable, Associations, AsChangeset)]
     #[table_name = "collections"]
     #[belongs_to(Organization, foreign_key = "org_uuid")]
     #[primary_key(uuid)]
@@ -13,7 +13,7 @@ db_object! {
         pub name: String,
     }
 
-    #[derive(Debug, Identifiable, Queryable, Insertable, Associations)]
+    #[derive(Identifiable, Queryable, Insertable, Associations)]
     #[table_name = "users_collections"]
     #[belongs_to(User, foreign_key = "user_uuid")]
     #[belongs_to(Collection, foreign_key = "collection_uuid")]
@@ -25,7 +25,7 @@ db_object! {
         pub hide_passwords: bool,
     }
 
-    #[derive(Debug, Identifiable, Queryable, Insertable, Associations)]
+    #[derive(Identifiable, Queryable, Insertable, Associations)]
     #[table_name = "ciphers_collections"]
     #[belongs_to(Cipher, foreign_key = "cipher_uuid")]
     #[belongs_to(Collection, foreign_key = "collection_uuid")]
@@ -127,11 +127,9 @@ impl Collection {
     }
 
     pub fn update_users_revision(&self, conn: &DbConn) {
-        UserOrganization::find_by_collection_and_org(&self.uuid, &self.org_uuid, conn)
-            .iter()
-            .for_each(|user_org| {
-                User::update_uuid_revision(&user_org.user_uuid, conn);
-            });
+        UserOrganization::find_by_collection_and_org(&self.uuid, &self.org_uuid, conn).iter().for_each(|user_org| {
+            User::update_uuid_revision(&user_org.user_uuid, conn);
+        });
     }
 
     pub fn find_by_uuid(uuid: &str, conn: &DbConn) -> Option<Self> {
@@ -170,10 +168,7 @@ impl Collection {
     }
 
     pub fn find_by_organization_and_user_uuid(org_uuid: &str, user_uuid: &str, conn: &DbConn) -> Vec<Self> {
-        Self::find_by_user_uuid(user_uuid, conn)
-            .into_iter()
-            .filter(|c| c.org_uuid == org_uuid)
-            .collect()
+        Self::find_by_user_uuid(user_uuid, conn).into_iter().filter(|c| c.org_uuid == org_uuid).collect()
     }
 
     pub fn find_by_organization(org_uuid: &str, conn: &DbConn) -> Vec<Self> {
@@ -284,7 +279,13 @@ impl CollectionUser {
         }}
     }
 
-    pub fn save(user_uuid: &str, collection_uuid: &str, read_only: bool, hide_passwords: bool, conn: &DbConn) -> EmptyResult {
+    pub fn save(
+        user_uuid: &str,
+        collection_uuid: &str,
+        read_only: bool,
+        hide_passwords: bool,
+        conn: &DbConn,
+    ) -> EmptyResult {
         User::update_uuid_revision(&user_uuid, conn);
 
         db_run! { conn:
@@ -374,11 +375,9 @@ impl CollectionUser {
     }
 
     pub fn delete_all_by_collection(collection_uuid: &str, conn: &DbConn) -> EmptyResult {
-        CollectionUser::find_by_collection(&collection_uuid, conn)
-            .iter()
-            .for_each(|collection| {
-                User::update_uuid_revision(&collection.user_uuid, conn);
-            });
+        CollectionUser::find_by_collection(&collection_uuid, conn).iter().for_each(|collection| {
+            User::update_uuid_revision(&collection.user_uuid, conn);
+        });
 
         db_run! { conn: {
             diesel::delete(users_collections::table.filter(users_collections::collection_uuid.eq(collection_uuid)))

@@ -1,11 +1,11 @@
+use num_traits::FromPrimitive;
 use serde_json::Value;
 use std::cmp::Ordering;
-use num_traits::FromPrimitive;
 
-use super::{CollectionUser, User, OrgPolicy};
+use super::{CollectionUser, OrgPolicy, User};
 
 db_object! {
-    #[derive(Debug, Identifiable, Queryable, Insertable, AsChangeset)]
+    #[derive(Identifiable, Queryable, Insertable, AsChangeset)]
     #[table_name = "organizations"]
     #[primary_key(uuid)]
     pub struct Organization {
@@ -14,7 +14,7 @@ db_object! {
         pub billing_email: String,
     }
 
-    #[derive(Debug, Identifiable, Queryable, Insertable, AsChangeset)]
+    #[derive(Identifiable, Queryable, Insertable, AsChangeset)]
     #[table_name = "users_organizations"]
     #[primary_key(uuid)]
     pub struct UserOrganization {
@@ -35,8 +35,7 @@ pub enum UserOrgStatus {
     Confirmed = 2,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
-#[derive(num_derive::FromPrimitive)]
+#[derive(Copy, Clone, PartialEq, Eq, num_derive::FromPrimitive)]
 pub enum UserOrgType {
     Owner = 0,
     Admin = 1,
@@ -90,17 +89,11 @@ impl PartialOrd<i32> for UserOrgType {
     }
 
     fn gt(&self, other: &i32) -> bool {
-        match self.partial_cmp(other) {
-            Some(Ordering::Less) | Some(Ordering::Equal) => false,
-            _ => true,
-        }
+        matches!(self.partial_cmp(other), Some(Ordering::Greater))
     }
 
     fn ge(&self, other: &i32) -> bool {
-        match self.partial_cmp(other) {
-            Some(Ordering::Less) => false,
-            _ => true,
-        }
+        matches!(self.partial_cmp(other), Some(Ordering::Greater) | Some(Ordering::Equal))
     }
 }
 
@@ -119,17 +112,11 @@ impl PartialOrd<UserOrgType> for i32 {
     }
 
     fn lt(&self, other: &UserOrgType) -> bool {
-        match self.partial_cmp(other) {
-            Some(Ordering::Less) | None => true,
-            _ => false,
-        }
+        matches!(self.partial_cmp(other), Some(Ordering::Less) | None)
     }
 
     fn le(&self, other: &UserOrgType) -> bool {
-        match self.partial_cmp(other) {
-            Some(Ordering::Less) | Some(Ordering::Equal) | None => true,
-            _ => false,
-        }
+        matches!(self.partial_cmp(other), Some(Ordering::Less) | Some(Ordering::Equal) | None)
     }
 }
 
@@ -202,11 +189,9 @@ use crate::error::MapResult;
 /// Database methods
 impl Organization {
     pub fn save(&self, conn: &DbConn) -> EmptyResult {
-        UserOrganization::find_by_org(&self.uuid, conn)
-            .iter()
-            .for_each(|user_org| {
-                User::update_uuid_revision(&user_org.user_uuid, conn);
-            });
+        UserOrganization::find_by_org(&self.uuid, conn).iter().for_each(|user_org| {
+            User::update_uuid_revision(&user_org.user_uuid, conn);
+        });
 
         db_run! { conn:
             sqlite, mysql {
@@ -247,7 +232,6 @@ impl Organization {
         Collection::delete_all_by_organization(&self.uuid, &conn)?;
         UserOrganization::delete_all_by_organization(&self.uuid, &conn)?;
         OrgPolicy::delete_all_by_organization(&self.uuid, &conn)?;
-
 
         db_run! { conn: {
             diesel::delete(organizations::table.filter(organizations::uuid.eq(self.uuid)))
@@ -359,11 +343,13 @@ impl UserOrganization {
             let collections = CollectionUser::find_by_organization_and_user_uuid(&self.org_uuid, &self.user_uuid, conn);
             collections
                 .iter()
-                .map(|c| json!({
-                    "Id": c.collection_uuid,
-                    "ReadOnly": c.read_only,
-                    "HidePasswords": c.hide_passwords,
-                }))
+                .map(|c| {
+                    json!({
+                        "Id": c.collection_uuid,
+                        "ReadOnly": c.read_only,
+                        "HidePasswords": c.hide_passwords,
+                    })
+                })
                 .collect()
         };
 
@@ -458,8 +444,7 @@ impl UserOrganization {
     }
 
     pub fn has_full_access(&self) -> bool {
-        (self.access_all || self.atype >= UserOrgType::Admin) &&
-            self.has_status(UserOrgStatus::Confirmed)
+        (self.access_all || self.atype >= UserOrgType::Admin) && self.has_status(UserOrgStatus::Confirmed)
     }
 
     pub fn find_by_uuid(uuid: &str, conn: &DbConn) -> Option<Self> {

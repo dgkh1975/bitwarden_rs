@@ -4,7 +4,7 @@ use super::Cipher;
 use crate::CONFIG;
 
 db_object! {
-    #[derive(Debug, Identifiable, Queryable, Insertable, Associations, AsChangeset)]
+    #[derive(Identifiable, Queryable, Insertable, Associations, AsChangeset)]
     #[table_name = "attachments"]
     #[changeset_options(treat_none_as_null="true")]
     #[belongs_to(super::Cipher, foreign_key = "cipher_uuid")]
@@ -59,7 +59,6 @@ use crate::error::MapResult;
 
 /// Database methods
 impl Attachment {
-
     pub fn save(&self, conn: &DbConn) -> EmptyResult {
         db_run! { conn:
             sqlite, mysql {

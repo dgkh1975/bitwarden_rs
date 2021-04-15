@@ -10,7 +10,7 @@ pub fn routes() -> Vec<Route> {
     // If addding more routes here, consider also adding them to
     // crate::utils::LOGGED_ROUTES to make sure they appear in the log
     if CONFIG.web_vault_enabled() {
-        routes![web_index, app_id, web_files, attachments, alive, static_files]
+        routes![web_index, app_id, web_files, attachments, sends, alive, static_files]
     } else {
         routes![attachments, alive, static_files]
     }
@@ -60,6 +60,11 @@ fn attachments(uuid: String, file: PathBuf) -> Option<NamedFile> {
     NamedFile::open(Path::new(&CONFIG.attachments_folder()).join(uuid).join(file)).ok()
 }
 
+#[get("/sends/<send_id>/<file_id>")]
+fn sends(send_id: String, file_id: String) -> Option<NamedFile> {
+    NamedFile::open(Path::new(&CONFIG.sends_folder()).join(send_id).join(file_id)).ok()
+}
+
 #[get("/alive")]
 fn alive() -> Json<String> {
     use crate::util::format_date;
@@ -78,12 +83,15 @@ fn static_files(filename: String) -> Result<Content<&'static [u8]>, Error> {
         "hibp.png" => Ok(Content(ContentType::PNG, include_bytes!("../static/images/hibp.png"))),
 
         "bootstrap.css" => Ok(Content(ContentType::CSS, include_bytes!("../static/scripts/bootstrap.css"))),
-        "bootstrap-native.js" => Ok(Content(ContentType::JavaScript, include_bytes!("../static/scripts/bootstrap-native.js"))),
-        "md5.js" => Ok(Content(ContentType::JavaScript, include_bytes!("../static/scripts/md5.js"))),
+        "bootstrap-native.js" => {
+            Ok(Content(ContentType::JavaScript, include_bytes!("../static/scripts/bootstrap-native.js")))
+        }
         "identicon.js" => Ok(Content(ContentType::JavaScript, include_bytes!("../static/scripts/identicon.js"))),
         "datatables.js" => Ok(Content(ContentType::JavaScript, include_bytes!("../static/scripts/datatables.js"))),
         "datatables.css" => Ok(Content(ContentType::CSS, include_bytes!("../static/scripts/datatables.css"))),
-        "jquery-3.5.1.slim.js" => Ok(Content(ContentType::JavaScript, include_bytes!("../static/scripts/jquery-3.5.1.slim.js"))),
+        "jquery-3.5.1.slim.js" => {
+            Ok(Content(ContentType::JavaScript, include_bytes!("../static/scripts/jquery-3.5.1.slim.js")))
+        }
         _ => err!(format!("Static file not found: {}", filename)),
     }
 }

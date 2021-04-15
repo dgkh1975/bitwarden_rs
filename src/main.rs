@@ -16,6 +16,7 @@ extern crate diesel;
 #[macro_use]
 extern crate diesel_migrations;
 
+use job_scheduler::{Job, JobScheduler};
 use std::{
     fs::create_dir_all,
     panic,
@@ -23,6 +24,7 @@ use std::{
     process::{exit, Command},
     str::FromStr,
     thread,
+    time::Duration,
 };
 
 #[macro_use]
@@ -38,6 +40,7 @@ mod util;
 
 pub use config::CONFIG;
 pub use error::{Error, MapResult};
+pub use util::is_running_in_docker;
 
 fn main() {
     parse_args();
@@ -47,25 +50,25 @@ fn main() {
     let level = LF::from_str(&CONFIG.log_level()).expect("Valid log level");
     init_logging(level).ok();
 
-    let extra_debug = match level {
-        LF::Trace | LF::Debug => true,
-        _ => false,
-    };
+    let extra_debug = matches!(level, LF::Trace | LF::Debug);
 
+    check_data_folder();
     check_rsa_keys();
     check_web_vault();
 
     create_icon_cache_folder();
 
-    launch_rocket(extra_debug);
+    let pool = create_db_pool();
+    schedule_jobs(pool.clone());
+    launch_rocket(pool, extra_debug); // Blocks until program termination.
 }
 
 const HELP: &str = "\
         A Bitwarden API server written in Rust
-        
+
         USAGE:
             bitwarden_rs
-        
+
         FLAGS:
             -h, --help       Prints help information
             -v, --version    Prints the app version
@@ -124,7 +127,9 @@ fn init_logging(level: log::LevelFilter) -> Result<(), fern::InitError> {
     // Enable smtp debug logging only specifically for smtp when need.
     // This can contain sensitive information we do not want in the default debug/trace logging.
     if CONFIG.smtp_debug() {
-        println!("[WARNING] SMTP Debugging is enabled (SMTP_DEBUG=true). Sensitive information could be disclosed via logs!");
+        println!(
+            "[WARNING] SMTP Debugging is enabled (SMTP_DEBUG=true). Sensitive information could be disclosed via logs!"
+        );
         println!("[WARNING] Only enable SMTP_DEBUG during troubleshooting!\n");
         logger = logger.level_for("lettre::transport::smtp", log::LevelFilter::Debug)
     } else {
@@ -215,9 +220,28 @@ fn chain_syslog(logger: fern::Dispatch) -> fern::Dispatch {
     }
 }
 
+fn create_dir(path: &str, description: &str) {
+    // Try to create the specified dir, if it doesn't already exist.
+    let err_msg = format!("Error creating {} directory '{}'", description, path);
+    create_dir_all(path).expect(&err_msg);
+}
+
 fn create_icon_cache_folder() {
-    // Try to create the icon cache folder, and generate an error if it could not.
-    create_dir_all(&CONFIG.icon_cache_folder()).expect("Error creating icon cache directory");
+    create_dir(&CONFIG.icon_cache_folder(), "icon cache");
+}
+
+fn check_data_folder() {
+    let data_folder = &CONFIG.data_folder();
+    let path = Path::new(data_folder);
+    if !path.exists() {
+        error!("Data folder '{}' doesn't exist.", data_folder);
+        if is_running_in_docker() {
+            error!("Verify that your data volume is mounted at the correct location.");
+        } else {
+            error!("Create the data folder and try again.");
+        }
+        exit(1);
+    }
 }
 
 fn check_rsa_keys() {
@@ -276,22 +300,27 @@ fn check_web_vault() {
     let index_path = Path::new(&CONFIG.web_vault_folder()).join("index.html");
 
     if !index_path.exists() {
-        error!("Web vault is not found at '{}'. To install it, please follow the steps in: ", CONFIG.web_vault_folder());
+        error!(
+            "Web vault is not found at '{}'. To install it, please follow the steps in: ",
+            CONFIG.web_vault_folder()
+        );
         error!("https://github.com/dani-garcia/bitwarden_rs/wiki/Building-binary#install-the-web-vault");
         error!("You can also set the environment variable 'WEB_VAULT_ENABLED=false' to disable it");
         exit(1);
     }
 }
 
-fn launch_rocket(extra_debug: bool) {
-    let pool = match util::retry_db(db::DbPool::from_config, CONFIG.db_connection_retries()) {
+fn create_db_pool() -> db::DbPool {
+    match util::retry_db(db::DbPool::from_config, CONFIG.db_connection_retries()) {
         Ok(p) => p,
         Err(e) => {
             error!("Error creating database pool: {:?}", e);
             exit(1);
         }
-    };
+    }
+}
 
+fn launch_rocket(pool: db::DbPool, extra_debug: bool) {
     let basepath = &CONFIG.domain_path();
 
     // If adding more paths here, consider also adding them to
@@ -306,11 +335,48 @@ fn launch_rocket(extra_debug: bool) {
         .manage(pool)
         .manage(api::start_notification_server())
         .attach(util::AppHeaders())
-        .attach(util::CORS())
+        .attach(util::Cors())
         .attach(util::BetterLogging(extra_debug))
         .launch();
 
     // Launch and print error if there is one
     // The launch will restore the original logging level
     error!("Launch error {:#?}", result);
+}
+
+fn schedule_jobs(pool: db::DbPool) {
+    if CONFIG.job_poll_interval_ms() == 0 {
+        info!("Job scheduler disabled.");
+        return;
+    }
+    thread::Builder::new()
+        .name("job-scheduler".to_string())
+        .spawn(move || {
+            let mut sched = JobScheduler::new();
+
+            // Purge sends that are past their deletion date.
+            if !CONFIG.send_purge_schedule().is_empty() {
+                sched.add(Job::new(CONFIG.send_purge_schedule().parse().unwrap(), || {
+                    api::purge_sends(pool.clone());
+                }));
+            }
+
+            // Purge trashed items that are old enough to be auto-deleted.
+            if !CONFIG.trash_purge_schedule().is_empty() {
+                sched.add(Job::new(CONFIG.trash_purge_schedule().parse().unwrap(), || {
+                    api::purge_trashed_ciphers(pool.clone());
+                }));
+            }
+
+            // Periodically check for jobs to run. We probably won't need any
+            // jobs that run more often than once a minute, so a default poll
+            // interval of 30 seconds should be sufficient. Users who want to
+            // schedule jobs to run more frequently for some reason can reduce
+            // the poll interval accordingly.
+            loop {
+                sched.tick();
+                thread::sleep(Duration::from_millis(CONFIG.job_poll_interval_ms()));
+            }
+        })
+        .expect("Error spawning job scheduler thread");
 }

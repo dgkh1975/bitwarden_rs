@@ -1,4 +1,4 @@
-use std::{str::FromStr};
+use std::str::FromStr;
 
 use chrono::{DateTime, Local};
 use percent_encoding::{percent_encode, NON_ALPHANUMERIC};
@@ -30,10 +30,10 @@ fn mailer() -> SmtpTransport {
     let smtp_client = if CONFIG.smtp_ssl() {
         let mut tls_parameters = TlsParameters::builder(host);
         if CONFIG.smtp_accept_invalid_hostnames() {
-            tls_parameters.dangerous_accept_invalid_hostnames(true);
+            tls_parameters = tls_parameters.dangerous_accept_invalid_hostnames(true);
         }
         if CONFIG.smtp_accept_invalid_certs() {
-            tls_parameters.dangerous_accept_invalid_certs(true);
+            tls_parameters = tls_parameters.dangerous_accept_invalid_certs(true);
         }
         let tls_parameters = tls_parameters.build().unwrap();
 
@@ -62,11 +62,13 @@ fn mailer() -> SmtpTransport {
             let mut selected_mechanisms = vec![];
             for wanted_mechanism in mechanism.split(',') {
                 for m in &allowed_mechanisms {
-                    if m.to_string().to_lowercase() == wanted_mechanism.trim_matches(|c| c == '"' || c == '\'' || c == ' ').to_lowercase() {
+                    if m.to_string().to_lowercase()
+                        == wanted_mechanism.trim_matches(|c| c == '"' || c == '\'' || c == ' ').to_lowercase()
+                    {
                         selected_mechanisms.push(*m);
                     }
                 }
-            };
+            }
 
             if !selected_mechanisms.is_empty() {
                 smtp_client.authentication(selected_mechanisms)
@@ -316,37 +318,27 @@ fn send_email(address: &str, subject: &str, body_html: String, body_text: String
 
     let smtp_from = &CONFIG.smtp_from();
     let email = Message::builder()
-        .message_id(Some(format!("<{}@{}>", crate::util::get_uuid(), smtp_from.split('@').collect::<Vec<&str>>()[1] )))
+        .message_id(Some(format!("<{}@{}>", crate::util::get_uuid(), smtp_from.split('@').collect::<Vec<&str>>()[1])))
         .to(Mailbox::new(None, Address::from_str(&address)?))
-        .from(Mailbox::new(
-            Some(CONFIG.smtp_from_name()),
-            Address::from_str(smtp_from)?,
-        ))
+        .from(Mailbox::new(Some(CONFIG.smtp_from_name()), Address::from_str(smtp_from)?))
         .subject(subject)
-        .multipart(
-            MultiPart::alternative()
-                .singlepart(text)
-                .singlepart(html)
-        )?;
+        .multipart(MultiPart::alternative().singlepart(text).singlepart(html))?;
 
     match mailer().send(&email) {
         Ok(_) => Ok(()),
         // Match some common errors and make them more user friendly
-        Err(e) => match e {
-            lettre::transport::smtp::Error::Client(x) => {
-                err!(format!("SMTP Client error: {}", x));
-            },
-            lettre::transport::smtp::Error::Transient(x) => {
-                err!(format!("SMTP 4xx error: {:?}", x.message));
-            },
-            lettre::transport::smtp::Error::Permanent(x) => {
-                err!(format!("SMTP 5xx error: {:?}", x.message));
-            },
-            lettre::transport::smtp::Error::Io(x) => {
-                err!(format!("SMTP IO error: {}", x));
-            },
-            // Fallback for all other errors
-            _ => Err(e.into())
+        Err(e) => {
+            if e.is_client() {
+                err!(format!("SMTP Client error: {}", e));
+            } else if e.is_transient() {
+                err!(format!("SMTP 4xx error: {:?}", e));
+            } else if e.is_permanent() {
+                err!(format!("SMTP 5xx error: {:?}", e));
+            } else if e.is_timeout() {
+                err!(format!("SMTP timeout error: {:?}", e));
+            } else {
+                Err(e.into())
+            }
         }
     }
 }
